@@ -1,0 +1,424 @@
+name: Windows RDP with EXE Execution and Persistent Storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      rdp_password:
+        description: 'Remote Desktop Password (min 8 chars, must include uppercase, lowercase, number, and special character)'
+        required: true
+        type: string
+      rdp_port:
+        description: 'Remote Desktop Port (default: 3389)'
+        required: false
+        default: '3389'
+        type: string
+      exe_url:
+        description: 'URL of EXE file to download and run (optional)'
+        required: false
+        default: ''
+        type: string
+      storage_repo:
+        description: 'GitHub repository for persistent storage (format: username/repo)'
+        required: false
+        default: ''
+        type: string
+      storage_token:
+        description: 'GitHub Personal Access Token with repo scope (for storage)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  windows-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 360  # 6小时超时（可根据需要调整）
+    
+    steps:
+      - name: 🚨 Important Disclaimer
+        run: |
+          Write-Host "============================================="
+          Write-Host "⚠️  IMPORTANT: FOR LEARNING PURPOSES ONLY"
+          Write-Host "============================================="
+          Write-Host "This workflow is provided solely for educational"
+          Write-Host "and learning purposes. Users are responsible for"
+          Write-Host "complying with GitHub's Terms of Service and"
+          Write-Host "all applicable laws and regulations."
+          Write-Host "============================================="
+        error-action: continue
+
+      - name: 📋 Validate Input Parameters
+        run: |
+          Write-Host "============================================="
+          Write-Host "Validating Input Parameters"
+          Write-Host "============================================="
+          
+          # Validate password complexity
+          $rdpPassword = "${{ inputs.rdp_password }}"
+          $passwordRequirements = @(
+              @{ Name = "Minimum length 8 characters"; Test = { $rdpPassword.Length -ge 8 } },
+              @{ Name = "At least one uppercase letter"; Test = { $rdpPassword -match '[A-Z]' } },
+              @{ Name = "At least one lowercase letter"; Test = { $rdpPassword -match '[a-z]' } },
+              @{ Name = "At least one number"; Test = { $rdpPassword -match '[0-9]' } },
+              @{ Name = "At least one special character"; Test = { $rdpPassword -match '[^a-zA-Z0-9]' } }
+          )
+          
+          $valid = $true
+          foreach ($req in $passwordRequirements) {
+              if (-not & $req.Test) {
+                  Write-Error "❌ Password validation failed: $($req.Name)"
+                  $valid = $false
+              } else {
+                  Write-Host "✅ $($req.Name)"
+              }
+          }
+          
+          if (-not $valid) {
+              Write-Error "❌ Password does not meet complexity requirements"
+              exit 1
+          }
+          
+          # Validate port number
+          $rdpPort = "${{ inputs.rdp_port }}"
+          if (-not ($rdpPort -match '^\d+$') -or $rdpPort -lt 1 -or $rdpPort -gt 65535) {
+              Write-Error "❌ Invalid port number: $rdpPort"
+              exit 1
+          }
+          
+          Write-Host "`n✅ All parameters validated successfully"
+        error-action: stop
+
+      - name: 🖥️ Configure Remote Desktop Access
+        run: |
+          Write-Host "============================================="
+          Write-Host "Configuring Remote Desktop Access"
+          Write-Host "============================================="
+          
+          try {
+              # Set RDP password from input
+              $rdpPassword = "${{ inputs.rdp_password }}"
+              $env:COMPUTERNAME = $env:COMPUTERNAME.ToUpper()
+              $userName = "GitHubActionsUser"
+              $rdpPort = "${{ inputs.rdp_port }}"
+              
+              Write-Host "`nCreating RDP user account: $userName"
+              
+              # Check if user already exists
+              if (-not (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue)) {
+                  # Create new user with proper error handling
+                  $securePassword = ConvertTo-SecureString $rdpPassword -AsPlainText -Force
+                  New-LocalUser -Name $userName -Password $securePassword `
+                                -FullName "GitHub Actions User" `
+                                -Description "User for RDP access (learning purposes only)" `
+                                -ErrorAction Stop
+                  
+                  # Add user to Remote Desktop Users group
+                  Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName -ErrorAction Stop
+                  Write-Host "✅ User $userName added to Remote Desktop Users group"
+              } else {
+                  Write-Host "ℹ️  User $userName already exists, updating password"
+                  $securePassword = ConvertTo-SecureString $rdpPassword -AsPlainText -Force
+                  Set-LocalUser -Name $userName -Password $securePassword -ErrorAction Stop
+              }
+              
+              # Enable Remote Desktop with proper error handling
+              Write-Host "`nEnabling Remote Desktop"
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                              -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
+              
+              # Configure RDP settings for better security
+              Write-Host "Configuring RDP security settings"
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                              -Name "UserAuthentication" -Value 1 -ErrorAction SilentlyContinue
+              
+              # Allow RDP through Windows Firewall
+              Write-Host "Configuring Windows Firewall for RDP"
+              $firewallRule = Get-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction SilentlyContinue
+              if ($firewallRule) {
+                  Remove-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction Stop
+              }
+              
+              New-NetFirewallRule -DisplayName "Allow RDP" `
+                                 -Direction Inbound `
+                                 -Protocol TCP `
+                                 -LocalPort $rdpPort `
+                                 -Action Allow `
+                                 -RemoteAddress Any `
+                                 -ErrorAction Stop
+              
+              # Get public IP address with retry logic
+              Write-Host "`nGetting public IP address"
+              $maxRetries = 3
+              $retryCount = 0
+              $publicIp = $null
+              
+              while ($retryCount -lt $maxRetries -and -not $publicIp) {
+                  try {
+                      $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip
+                  } catch {
+                      $retryCount++
+                      Write-Warning "Failed to get public IP (attempt $retryCount/$maxRetries): $_"
+                      Start-Sleep -Seconds 2
+                  }
+              }
+              
+              if (-not $publicIp) {
+                  $publicIp = "Unknown"
+                  Write-Warning "⚠️  Could not determine public IP address"
+              }
+              
+              Write-Host "`n============================================="
+              Write-Host "✅ Remote Desktop Configuration Complete"
+              Write-Host "============================================="
+              Write-Host "`n📋 RDP Connection Details:"
+              Write-Host "   Computer: $publicIp`:$rdpPort"
+              Write-Host "   Username: $env:COMPUTERNAME\$userName"
+              Write-Host "   Password: [The password you provided]"
+              Write-Host "`n⚠️  Note: This is for LEARNING PURPOSES ONLY"
+              Write-Host "⚠️  Session will run for up to 6 hours"
+              Write-Host "============================================="
+              
+          } catch {
+              Write-Error "❌ RDP configuration failed: $_"
+              # Clean up on failure
+              if (Get-LocalUser -Name "GitHubActionsUser" -ErrorAction SilentlyContinue) {
+                  Remove-LocalUser -Name "GitHubActionsUser" -Force -ErrorAction SilentlyContinue
+              }
+              exit 1
+          }
+        error-action: stop
+
+      - name: 📥 Download and Run EXE File
+        if: ${{ inputs.exe_url != '' }}
+        run: |
+          Write-Host "============================================="
+          Write-Host "Downloading and Running EXE File"
+          Write-Host "============================================="
+          
+          try {
+              $exeUrl = "${{ inputs.exe_url }}"
+              $exePath = "$env:TEMP\app.exe"
+              
+              Write-Host "Downloading EXE from: $exeUrl"
+              Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -TimeoutSec 300
+              
+              if (Test-Path $exePath) {
+                  Write-Host "✅ EXE downloaded successfully"
+                  
+                  Write-Host "`nRunning EXE file..."
+                  Start-Process -FilePath $exePath -NoNewWindow -PassThru | Out-Null
+                  Write-Host "✅ EXE started successfully"
+              } else {
+                  Write-Error "❌ Failed to download EXE file"
+              }
+          } catch {
+              Write-Warning "⚠️  EXE execution failed: $_"
+              # Continue even if EXE fails
+          }
+        error-action: continue
+
+      - name: 💾 Initialize Persistent Storage
+        if: ${{ inputs.storage_repo != '' && inputs.storage_token != '' }}
+        run: |
+          Write-Host "============================================="
+          Write-Host "Initializing Persistent Storage"
+          Write-Host "============================================="
+          
+          try {
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = "C:\PersistentStorage"
+              
+              # Create storage directory
+              if (-not (Test-Path $storageDir)) {
+                  New-Item -ItemType Directory -Path $storageDir -Force | Out-Null
+                  Write-Host "✅ Created storage directory: $storageDir"
+              }
+              
+              # Configure Git for storage
+              $env:GIT_REDIRECT_STDERR = '2>&1'
+              $env:GITHUB_TOKEN = $storageToken
+              
+              # Clone or pull storage repository
+              $repoPath = "$storageDir\repo"
+              if (-not (Test-Path $repoPath)) {
+                  Write-Host "Cloning storage repository: $storageRepo"
+                  git clone "https://$storageToken@github.com/$storageRepo.git" $repoPath
+                  Write-Host "✅ Repository cloned successfully"
+              } else {
+                  Write-Host "Updating storage repository"
+                  Set-Location $repoPath
+                  git pull
+                  Write-Host "✅ Repository updated successfully"
+              }
+              
+              Write-Host "`n✅ Persistent storage initialized"
+          } catch {
+              Write-Warning "⚠️  Storage initialization failed: $_"
+              # Continue even if storage fails
+          }
+        error-action: continue
+
+      - name: ⏳ Keep Session Alive (with Storage Sync)
+        run: |
+          Write-Host "============================================="
+          Write-Host "Starting Session Keep-Alive Process"
+          Write-Host "============================================="
+          
+          try {
+              $startTime = Get-Date
+              $userName = "GitHubActionsUser"
+              $rdpPort = "${{ inputs.rdp_port }}"
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = "C:\PersistentStorage\repo"
+              
+              # Get public IP again for convenience
+              $maxRetries = 3
+              $retryCount = 0
+              $publicIp = $null
+              
+              while ($retryCount -lt $maxRetries -and -not $publicIp) {
+                  try {
+                      $publicIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip
+                  } catch {
+                      $retryCount++
+                      Write-Warning "Failed to get public IP (attempt $retryCount/$maxRetries): $_"
+                      Start-Sleep -Seconds 2
+                  }
+              }
+              
+              if (-not $publicIp) {
+                  $publicIp = "Unknown"
+              }
+              
+              Write-Host "`n📋 RDP Connection Details:"
+              Write-Host "------------------------"
+              Write-Host "Computer: $publicIp`:$rdpPort"
+              Write-Host "Username: $env:COMPUTERNAME\$userName"
+              Write-Host "Password: [The password you provided]"
+              Write-Host "`n⚠️  IMPORTANT: FOR LEARNING PURPOSES ONLY"
+              Write-Host "⚠️  Session will run for up to 6 hours"
+              
+              # Session monitoring loop
+              $iteration = 0
+              $lastStorageSync = Get-Date
+              $storageSyncInterval = New-TimeSpan -Minutes 30
+              
+              while ($true) {
+                  $iteration++
+                  $currentTime = Get-Date
+                  $elapsed = ($currentTime - $startTime).TotalHours
+                  
+                  # Display status every 15 minutes
+                  if ($iteration % 3 -eq 0) {
+                      $elapsedHours = [math]::Round($elapsed, 2)
+                      Write-Host "`n🔄 Session active for $elapsedHours hours"
+                      
+                      # Check RDP connections
+                      try {
+                          $rdpSessions = qwinsta.exe 2>&1 | Select-String -Pattern "$userName"
+                          if ($rdpSessions) {
+                              Write-Host "👤 Active RDP connection detected"
+                          } else {
+                              Write-Host "⚠️  No active RDP connections"
+                          }
+                      } catch {
+                          Write-Warning "⚠️  Failed to check RDP sessions: $_"
+                      }
+                  }
+                  
+                  # Sync storage every 30 minutes
+                  if ($storageRepo -ne '' -and $storageToken -ne '' -and 
+                      (Test-Path $storageDir) -and 
+                      ($currentTime - $lastStorageSync) -ge $storageSyncInterval) {
+                      
+                      Write-Host "`n🔄 Syncing persistent storage..."
+                      try {
+                          $env:GIT_REDIRECT_STDERR = '2>&1'
+                          $env:GITHUB_TOKEN = $storageToken
+                          
+                          Set-Location $storageDir
+                          git add .
+                          git commit -m "Auto-sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                          git push
+                          
+                          Write-Host "✅ Storage synced successfully"
+                          $lastStorageSync = $currentTime
+                      } catch {
+                          Write-Warning "⚠️  Storage sync failed: $_"
+                      }
+                  }
+                  
+                  # First iteration message
+                  if ($iteration -eq 1) {
+                      Write-Host "`n🔄 Session started successfully"
+                  }
+                  
+                  # Sleep for 5 minutes
+                  Start-Sleep -Seconds 300
+              }
+          } catch {
+              Write-Error "❌ Keep-alive process failed: $_"
+              exit 1
+          }
+        error-action: stop
+
+      - name: 🧹 Final Cleanup
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "Final Cleanup"
+          Write-Host "============================================="
+          
+          try {
+              # Final storage sync
+              $storageRepo = "${{ inputs.storage_repo }}"
+              $storageToken = "${{ inputs.storage_token }}"
+              $storageDir = "C:\PersistentStorage\repo"
+              
+              if ($storageRepo -ne '' -and $storageToken -ne '' -and (Test-Path $storageDir)) {
+                  Write-Host "🔄 Final storage sync..."
+                  try {
+                      $env:GIT_REDIRECT_STDERR = '2>&1'
+                      $env:GITHUB_TOKEN = $storageToken
+                      
+                      Set-Location $storageDir
+                      git add .
+                      git commit -m "Final sync: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                      git push
+                      
+                      Write-Host "✅ Final storage sync completed"
+                  } catch {
+                      Write-Warning "⚠️  Final storage sync failed: $_"
+                  }
+              }
+              
+              # Remove RDP user
+              $userName = "GitHubActionsUser"
+              if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
+                  Write-Host "Removing RDP user: $userName"
+                  Remove-LocalUser -Name $userName -Force -ErrorAction Stop
+                  Write-Host "✅ RDP user removed"
+              }
+              
+              # Disable RDP
+              Write-Host "Disabling Remote Desktop"
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                              -Name "fDenyTSConnections" -Value 1 -ErrorAction Stop
+              Write-Host "✅ Remote Desktop disabled"
+              
+              # Remove RDP firewall rule
+              Write-Host "Removing RDP firewall rule"
+              $firewallRule = Get-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction SilentlyContinue
+              if ($firewallRule) {
+                  Remove-NetFirewallRule -DisplayName "Allow RDP" -ErrorAction Stop
+                  Write-Host "✅ RDP firewall rule removed"
+              }
+              
+              Write-Host "`n✅ Cleanup completed successfully"
+              Write-Host "`n⚠️  REMINDER: This was for LEARNING PURPOSES ONLY"
+          } catch {
+              Write-Error "❌ Cleanup failed: $_"
+              # Continue even if cleanup has errors
+          }
+        error-action: continue
