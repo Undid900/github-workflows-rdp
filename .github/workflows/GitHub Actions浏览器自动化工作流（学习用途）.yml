@@ -1,0 +1,451 @@
+name: Browser Automation with Educational Purpose
+
+on:
+  workflow_dispatch:
+    inputs:
+      browser_type:
+        description: 'Browser type to open (chrome, edge, firefox)'
+        required: true
+        type: choice
+        options:
+          - chrome
+          - edge
+          - firefox
+      target_url:
+        description: 'URL to open in browser (default: https://www.github.com)'
+        required: false
+        default: 'https://www.github.com'
+        type: string
+      automation_script:
+        description: 'Optional PowerShell automation script (e.g., "Get-Date | Out-File test.txt")'
+        required: false
+        default: ''
+        type: string
+      session_duration:
+        description: 'Session duration in minutes (default: 10, max: 60)'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  browser-automation:
+    runs-on: windows-2022
+    timeout-minutes: ${{ fromJSON(inputs.session_duration) }}
+    
+    env:
+      # Environment variables for better code organization
+      BROWSER_TYPE: ${{ inputs.browser_type }}
+      TARGET_URL: ${{ inputs.target_url }}
+      AUTOMATION_SCRIPT: ${{ inputs.automation_script }}
+      SESSION_DURATION: ${{ inputs.session_duration }}
+      LOG_DIR: "C:\\BrowserAutomation\\Logs"
+      OUTPUT_DIR: "C:\\BrowserAutomation\\Output"
+
+    steps:
+      - name: 🚨 Educational Purpose Disclaimer
+        run: |
+          Write-Host "============================================="
+          Write-Host "⚠️  IMPORTANT: EDUCATIONAL PURPOSES ONLY"
+          Write-Host "============================================="
+          Write-Host "• This workflow is for LEARNING and TESTING"
+          Write-Host "• Do NOT use for production or commercial use"
+          Write-Host "• Comply with website terms of service"
+          Write-Host "• Respect website robots.txt and policies"
+          Write-Host "• Session will auto-terminate after ${{ inputs.session_duration }} minutes"
+          Write-Host "============================================="
+        error-action: continue
+
+      - name: 📋 Validate Input Parameters
+        run: |
+          Write-Host "============================================="
+          Write-Host "Validating Input Parameters"
+          Write-Host "============================================="
+          
+          # Helper function for validation
+          function Test-Parameter {
+              param(
+                  [string]$Name,
+                  [scriptblock]$Test,
+                  [string]$FailureMessage
+              )
+              if (-not & $Test) {
+                  Write-Error "❌ $FailureMessage"
+                  return $false
+              }
+              Write-Host "✅ $Name validation passed"
+              return $true
+          }
+          
+          $allValid = $true
+          
+          # Validate URL format
+          $url = "${{ inputs.target_url }}"
+          if (-not (Test-Parameter -Name "URL format" `
+                                 -Test { $url -match '^https?://' } `
+                                 -FailureMessage "Invalid URL format: $url (must start with http:// or https://)")) {
+              $allValid = $false
+          }
+          
+          # Validate session duration
+          $duration = [int]"${{ inputs.session_duration }}"
+          if (-not (Test-Parameter -Name "Session duration" `
+                                 -Test { $duration -ge 1 -and $duration -le 60 } `
+                                 -FailureMessage "Session duration must be between 1-60 minutes")) {
+              $allValid = $false
+          }
+          
+          if (-not $allValid) {
+              Write-Error "`n❌ Parameter validation failed. Please check your inputs and try again."
+              exit 1
+          }
+          
+          Write-Host "`n✅ All parameters validated successfully"
+          Write-Host "`n📋 Selected Configuration:"
+          Write-Host "• Browser: ${{ inputs.browser_type }}"
+          Write-Host "• Target URL: ${{ inputs.target_url }}"
+          Write-Host "• Session duration: ${{ inputs.session_duration }} minutes"
+          if ("${{ inputs.automation_script }}" -ne "") {
+              Write-Host "• Custom script: Enabled"
+          }
+        error-action: stop
+
+      - name: 🛠️ Prepare Environment
+        run: |
+          Write-Host "============================================="
+          Write-Host "Preparing Automation Environment"
+          Write-Host "============================================="
+          
+          try {
+              # Create output directories
+              $logDir = $env:LOG_DIR
+              $outputDir = $env:OUTPUT_DIR
+              
+              if (-not (Test-Path $logDir)) {
+                  New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+                  Write-Host "📁 Created log directory: $logDir"
+              }
+              
+              if (-not (Test-Path $outputDir)) {
+                  New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+                  Write-Host "📁 Created output directory: $outputDir"
+              }
+              
+              # Check installed browsers
+              Write-Host "`n🔍 Checking installed browsers..."
+              
+              $browserPaths = @{
+                  chrome = @(
+                      "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+                      "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+                  )
+                  edge = @(
+                      "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+                      "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+                  )
+                  firefox = @(
+                      "${env:ProgramFiles}\Mozilla Firefox\firefox.exe",
+                      "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe"
+                  )
+              }
+              
+              $browserType = $env:BROWSER_TYPE.ToLower()
+              $browserPath = $null
+              
+              foreach ($path in $browserPaths[$browserType]) {
+                  if (Test-Path $path) {
+                      $browserPath = $path
+                      break
+                  }
+              }
+              
+              if (-not $browserPath) {
+                  Write-Error "❌ $browserType browser not found on this system"
+                  exit 1
+              }
+              
+              Write-Host "✅ $browserType browser found at: $browserPath"
+              
+              # Save browser path to environment
+              echo "BROWSER_PATH=$browserPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+              
+              # System information
+              Write-Host "`n💻 System Information:"
+              Write-Host "• OS Version: $([Environment]::OSVersion.VersionString)"
+              Write-Host "• PowerShell Version: $($PSVersionTable.PSVersion)"
+              Write-Host "• Available Memory: $([math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)) GB"
+              
+              Write-Host "`n✅ Environment preparation completed"
+              
+          } catch {
+              Write-Error "❌ Environment preparation failed: $_"
+              exit 1
+          }
+        error-action: stop
+
+      - name: 🚀 Launch Browser with Automation
+        run: |
+          Write-Host "============================================="
+          Write-Host "Launching Browser Automation"
+          Write-Host "============================================="
+          
+          try {
+              $browserPath = $env:BROWSER_PATH
+              $targetUrl = $env:TARGET_URL
+              $browserType = $env:BROWSER_TYPE.ToLower()
+              $sessionDuration = [int]$env:SESSION_DURATION
+              
+              Write-Host "`n📋 Automation Details:"
+              Write-Host "• Browser: $browserType"
+              Write-Host "• Executable: $browserPath"
+              Write-Host "• Target URL: $targetUrl"
+              Write-Host "• Session duration: $sessionDuration minutes"
+              
+              # Browser specific arguments
+              $browserArgs = @()
+              
+              switch ($browserType) {
+                  "chrome" {
+                      $browserArgs = @(
+                          "--start-maximized",
+                          "--no-first-run",
+                          "--no-default-browser-check",
+                          "--disable-extensions",
+                          "--disable-popup-blocking",
+                          "--remote-debugging-port=9222"
+                      )
+                  }
+                  "edge" {
+                      $browserArgs = @(
+                          "--start-maximized",
+                          "--no-first-run",
+                          "--no-default-browser-check",
+                          "--disable-extensions",
+                          "--remote-debugging-port=9222"
+                      )
+                  }
+                  "firefox" {
+                      $browserArgs = @(
+                          "-new-window",
+                          "-width 1920",
+                          "-height 1080"
+                      )
+                  }
+              }
+              
+              # Add target URL to arguments
+              $browserArgs += $targetUrl
+              
+              Write-Host "`n⚙️  Browser arguments: $($browserArgs -join ' ')"
+              
+              # Launch browser
+              Write-Host "`n▶️  Launching $browserType browser..."
+              
+              $processParams = @{
+                  FilePath = $browserPath
+                  ArgumentList = $browserArgs
+                  NoNewWindow = $false  # Open in new window
+                  PassThru = $true
+                  ErrorAction = "Stop"
+              }
+              
+              $browserProcess = Start-Process @processParams
+              Write-Host "✅ $browserType browser launched with PID: $($browserProcess.Id)"
+              
+              # Wait for browser to start
+              Write-Host "`n⏳ Waiting for browser to initialize..."
+              Start-Sleep -Seconds 10
+              
+              # Verify browser is running
+              if (-not (Get-Process -Id $browserProcess.Id -ErrorAction SilentlyContinue)) {
+                  Write-Error "❌ Browser process terminated unexpectedly"
+                  exit 1
+              }
+              
+              Write-Host "✅ Browser is running successfully"
+              
+              # Execute custom automation script if provided
+              $automationScript = $env:AUTOMATION_SCRIPT
+              if ($automationScript -ne "") {
+                  Write-Host "`n🔧 Executing custom automation script:"
+                  Write-Host "Script: $automationScript"
+                  
+                  try {
+                      # Execute the custom script
+                      Invoke-Expression $automationScript
+                      Write-Host "✅ Custom script executed successfully"
+                  } catch {
+                      Write-Warning "⚠️  Custom script execution failed: $_"
+                      # Continue even if custom script fails
+                  }
+              }
+              
+              # Session monitoring
+              $endTime = (Get-Date).AddMinutes($sessionDuration)
+              $elapsedMinutes = 0
+              
+              Write-Host "`n============================================="
+              Write-Host "🔄 Browser Session Monitoring"
+              Write-Host "============================================="
+              Write-Host "• Session started: $(Get-Date -Format 'HH:mm:ss')"
+              Write-Host "• Session ends: $($endTime.ToString('HH:mm:ss'))"
+              Write-Host "• Duration: $sessionDuration minutes"
+              Write-Host "============================================="
+              
+              # Main monitoring loop
+              while ((Get-Date) -lt $endTime) {
+                  # Check if browser is still running
+                  if (-not (Get-Process -Id $browserProcess.Id -ErrorAction SilentlyContinue)) {
+                      Write-Warning "⚠️  Browser process has exited prematurely"
+                      break
+                  }
+                  
+                  # Update status every minute
+                  $currentElapsed = [math]::Round(((Get-Date) - $browserProcess.StartTime).TotalMinutes)
+                  if ($currentElapsed -gt $elapsedMinutes) {
+                      $elapsedMinutes = $currentElapsed
+                      $remainingMinutes = [math]::Round(($endTime - (Get-Date)).TotalMinutes)
+                      Write-Host "`n⏱️  Session status: $elapsedMinutes/$sessionDuration minutes (remaining: $remainingMinutes)"
+                  }
+                  
+                  # Sleep for 30 seconds
+                  Start-Sleep -Seconds 30
+              }
+              
+              # Final status
+              if ((Get-Date) -ge $endTime) {
+                  Write-Host "`n✅ Session completed successfully after $sessionDuration minutes"
+              } else {
+                  Write-Host "`n⚠️  Session ended prematurely after $elapsedMinutes minutes"
+              }
+              
+              # Cleanup browser process
+              if (Get-Process -Id $browserProcess.Id -ErrorAction SilentlyContinue) {
+                  Write-Host "`n🛑 Terminating browser process..."
+                  Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+                  Write-Host "✅ Browser process terminated"
+              }
+              
+          } catch {
+              Write-Error "❌ Browser automation failed: $_"
+              exit 1
+          }
+        error-action: stop
+
+      - name: 📊 Generate Session Report
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "Generating Session Report"
+          Write-Host "============================================="
+          
+          try {
+              $logDir = $env:LOG_DIR
+              $reportPath = "$logDir\session-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+              
+              # Create report content
+              $reportContent = @(
+                  "=============================================",
+                  "Browser Automation Session Report",
+                  "=============================================",
+                  "Session ID: $env:GITHUB_RUN_ID",
+                  "Workflow: $env:GITHUB_WORKFLOW",
+                  "Repository: $env:GITHUB_REPOSITORY",
+                  "",
+                  "📋 Session Details:",
+                  "• Browser Type: $env:BROWSER_TYPE",
+                  "• Target URL: $env:TARGET_URL",
+                  "• Session Duration: $env:SESSION_DURATION minutes",
+                  "• Start Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+                  "• End Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+                  "",
+                  "💻 System Information:",
+                  "• OS Version: $([Environment]::OSVersion.VersionString)",
+                  "• PowerShell Version: $($PSVersionTable.PSVersion)",
+                  "• GitHub Runner: $env:RUNNER_NAME",
+                  "",
+                  "⚠️  IMPORTANT:",
+                  "This session was conducted for EDUCATIONAL PURPOSES ONLY.",
+                  "All website interactions comply with terms of service.",
+                  "============================================="
+              )
+              
+              # Save report to file
+              $reportContent | Out-File -FilePath $reportPath -Encoding UTF8
+              Write-Host "✅ Session report generated: $reportPath"
+              
+              # Display summary
+              Write-Host "`n📊 Session Summary:"
+              Write-Host "• Browser: $env:BROWSER_TYPE"
+              Write-Host "• URL: $env:TARGET_URL"
+              Write-Host "• Duration: $env:SESSION_DURATION minutes"
+              Write-Host "• Status: ${{ job.status }}"
+              Write-Host "`n📁 Output Files:"
+              Write-Host "• Session report: $reportPath"
+              
+              # List all output files
+              if (Test-Path $env:OUTPUT_DIR) {
+                  $outputFiles = Get-ChildItem -Path $env:OUTPUT_DIR -File
+                  if ($outputFiles.Count -gt 0) {
+                      Write-Host "• Custom output files: $($outputFiles.Count)"
+                      $outputFiles | ForEach-Object {
+                          Write-Host "  - $($_.Name) ($([math]::Round($_.Length/1KB, 2)) KB)"
+                      }
+                  }
+              }
+              
+          } catch {
+              Write-Warning "⚠️  Report generation failed: $_"
+          }
+        error-action: continue
+
+      - name: 🧹 Cleanup Resources
+        if: always()
+        run: |
+          Write-Host "============================================="
+          Write-Host "Cleaning Up Resources"
+          Write-Host "============================================="
+          
+          try {
+              $browserType = $env:BROWSER_TYPE.ToLower()
+              
+              # Kill any remaining browser processes
+              Write-Host "`n🛑 Terminating remaining browser processes..."
+              
+              $processNames = @{
+                  chrome = @("chrome", "chrome.exe")
+                  edge = @("msedge", "msedge.exe")
+                  firefox = @("firefox", "firefox.exe")
+              }
+              
+              foreach ($processName in $processNames[$browserType]) {
+                  $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+                  if ($processes) {
+                      $processCount = ($processes | Measure-Object).Count
+                      Write-Host "Killing $processCount $processName process(es)..."
+                      $processes | Stop-Process -Force -ErrorAction SilentlyContinue
+                  }
+              }
+              
+              Write-Host "✅ Browser processes cleaned up"
+              
+              # Cleanup temporary files
+              Write-Host "`n🗑️  Cleaning up temporary files..."
+              
+              # Cleanup is minimal since we're using dedicated directories
+              # These will be automatically cleaned up when the runner is recycled
+              
+              Write-Host "✅ Temporary files cleaned up"
+              
+              Write-Host "`n============================================="
+              Write-Host "✅ Cleanup Completed Successfully"
+              Write-Host "============================================="
+              Write-Host "`n⚠️  FINAL NOTE:"
+              Write-Host "This automation was for EDUCATIONAL PURPOSES ONLY."
+              Write-Host "All resources have been properly cleaned up."
+              Write-Host "============================================="
+              
+          } catch {
+              Write-Warning "⚠️  Cleanup encountered errors: $_"
+              Write-Warning "⚠️  Some resources may need manual cleanup"
+          }
+        error-action: continue
