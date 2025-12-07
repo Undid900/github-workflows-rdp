@@ -1,81 +1,179 @@
-name: Browser Automation with Educational Purpose
+name: Minecraft Server with Persistence and Shaders
 
 on:
   workflow_dispatch:
     inputs:
-      browser_type:
-        description: 'Browser type to open (chrome, edge, firefox)'
+      version:
+        description: 'Minecraft Server Version'
         required: true
-        type: choice
-        options:
-          - chrome
-          - edge
-          - firefox
-      target_url:
-        description: 'URL to open in browser (default: https://www.github.com)'
-        required: false
-        default: 'https://www.github.com'
+        default: '1.20.1'
         type: string
-      automation_script:
-        description: 'Optional PowerShell automation script (e.g., "Get-Date | Out-File test.txt")'
+      memory:
+        description: 'Server Memory (GB)'
+        required: true
+        default: '4'
+        type: string
+      shaderpack:
+        description: 'Shader Pack URL (optional)'
         required: false
         default: ''
         type: string
-      session_duration:
-        description: 'Session duration in minutes (default: 10, max: 60)'
-        required: false
-        default: '10'
-        type: string
+
+env:
+  SERVER_VERSION: ${{ github.event.inputs.version }}
+  SERVER_MEMORY: ${{ github.event.inputs.memory }}
+  SHADERPACK_URL: ${{ github.event.inputs.shaderpack }}
+  PERSISTENT_DIR: '.minecraft-persistent'
+  SERVER_TYPE: 'paper'
+  SERVER_PORT: '25565'
+  MAX_PLAYERS: '10'
 
 jobs:
-  browser-automation:
-    runs-on: windows-2022
-    timeout-minutes: ${{ inputs.session_duration }}
+  minecraft-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     
-    env:
-      BROWSER_TYPE: ${{ inputs.browser_type }}
-      TARGET_URL: ${{ inputs.target_url }}
-      AUTOMATION_SCRIPT: ${{ inputs.automation_script }}
-      SESSION_DURATION: ${{ inputs.session_duration }}
-      LOG_DIR: "C:\\BrowserAutomation\\Logs"
-      OUTPUT_DIR: "C:\\BrowserAutomation\\Output"
-
     steps:
-      - name: 🚨🚨🚨 Educational Purpose Disclaimer
-        run: |
-          Write-Host "============================================="
-          Write-Host "⚠️  IMPORTANT: EDUCATIONAL PURPOSES ONLY"
-          Write-Host "============================================="
-          Write-Host "• This workflow is for LEARNING and TESTING"
-          Write-Host "• Do NOT use for production or commercial use"
-          Write-Host "• Comply with website terms of service"
-          Write-Host "• Respect website robots.txt and policies"
-          Write-Host "• Session will auto-terminate after ${{ inputs.session_duration }} minutes"
-          Write-Host "============================================="
-        continue-on-error: true
-
-      - name: 📋📋 Validate Input Parameters
-        run: |
-          # 验证代码保持不变...
-        continue-on-error: false
-
-      - name: 🛠🛠🛠️ Prepare Environment
-        run: |
-          # 环境准备代码保持不变...
-        continue-on-error: false
-
-      - name: 🚀🚀🚀 Launch Browser with Automation
-        run: |
-          # 浏览器自动化代码保持不变...
-        continue-on-error: false
-
-      - name: 📊📊 Generate Session Report
-        if: always()
-        run: |
-          # 报告生成代码保持不变...
-        continue-on-error: true
-
-      - name: 🧹🧹🧹 Cleanup Resources
-        if: always()
-          # 清理代码保持不变...
-        continue-on-error: true
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 设置持久化存储目录
+      run: |
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world_nether
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world_the_end
+        mkdir -p ${{ env.PERSISTENT_DIR }}/plugins
+        mkdir -p ${{ env.PERSISTENT_DIR }}/mods  # 修复：大小写一致
+        mkdir -p ${{ env.PERSISTENT_DIR }}/shaderpacks
+        mkdir -p ${{ env.PERSISTENT_DIR }}/config
+        
+        if [ -f "${{ env.PERSISTENT_DIR }}/server.properties" ]; then
+          echo "恢复之前的服务器配置..."
+          # 更安全的复制方式
+          find ${{ env.PERSISTENT_DIR }} -mindepth 1 -maxdepth 1 -exec cp -r {} . \; 2>/dev/null || true
+        fi
+        
+    - name: 设置Java环境
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: 下载Minecraft服务端
+      run: |
+        echo "正在下载 ${{ env.SERVER_TYPE }} 服务端..."
+        
+        if [ "${{ env.SERVER_TYPE }}" = "paper" ]; then
+          PAPER_URL="https://api.papermc.io/v2/projects/paper/versions/${{ env.SERVER_VERSION }}/builds/latest/downloads/paper-${{ env.SERVER_VERSION }}-latest.jar"
+          curl -f -L -o server.jar "$PAPER_URL" || exit 1
+          
+        elif [ "${{ env.SERVER_TYPE }}" = "purpur" ]; then
+          PURPUR_URL="https://api.purpurmc.org/v2/purpur/${{ env.SERVER_VERSION }}/latest/download"
+          curl -f -L -o server.jar "$PURPUR_URL" || exit 1
+          
+        elif [ "${{ env.SERVER_TYPE }}" = "fabric" ]; then
+          # 动态获取Fabric版本
+          FABRIC_MANIFEST=$(curl -s "https://meta.fabricmc.net/v2/versions/loader/${{ env.SERVER_VERSION }}")
+          LOADER_VERSION=$(echo "$FABRIC_MANIFEST" | grep -o '"loader":[[:space:]]*{[^}]*' | grep -o '"version":"[^"]*' | cut -d'"' -f4 | head -1)
+          INSTALLER_VERSION=$(echo "$FABRIC_MANIFEST" | grep -o '"installer":[[:space:]]*{[^}]*' | grep -o '"version":"[^"]*' | cut -d'"' -f4 | head -1)
+          
+          if [ -z "$LOADER_VERSION" ] || [ -z "$INSTALLER_VERSION" ]; then
+            echo "错误：无法获取Fabric版本信息"
+            exit 1
+          fi
+          
+          FABRIC_URL="https://meta.fabricmc.net/v2/versions/loader/${{ env.SERVER_VERSION }}/$LOADER_VERSION/$INSTALLER_VERSION/server/jar"
+          curl -f -L -o server.jar "$FABRIC_URL" || exit 1
+          
+        else
+          VANILLA_MANIFEST=$(curl -s https://launchermeta.mojang.com/mc/game/version_manifest.json)
+          VANILLA_URL=$(echo "$VANILLA_MANIFEST" | grep -A 10 "\"id\":\"${{ env.SERVER_VERSION }}\"" | grep '"url":' | cut -d'"' -f4)
+          if [ -z "$VANILLA_URL" ]; then
+            echo "错误：无法找到版本 ${{ env.SERVER_VERSION }}"
+            exit 1
+          fi
+          JAR_URL=$(curl -s "$VANILLA_URL" | grep '"server":' | grep -o '"url":"[^"]*' | cut -d'"' -f4)
+          curl -f -L -o server.jar "$JAR_URL" || exit 1
+        fi
+        
+        echo "服务端下载完成！"
+        
+    - name: 生成服务器配置文件
+      run: |
+        echo "eula=true" > eula.txt
+        
+        cat > server.properties << EOF
+# Minecraft服务器配置
+max-players=${{ env.MAX_PLAYERS }}
+server-port=${{ env.SERVER_PORT }}
+online-mode=true
+motd=GitHub Actions Minecraft Server
+view-distance=10
+EOF
+        
+    - name: 下载并安装光影模组
+      if: ${{ env.SHADERPACK_URL != '' }}
+      run: |
+        echo "正在安装光影支持..."
+        mkdir -p mods
+        
+        # 简化的光影安装逻辑
+        if [ "${{ env.SERVER_TYPE }}" = "fabric" ] && [ -n "${{ env.SHADERPACK_URL }}" ]; then
+          echo "下载Iris Shaders..."
+          # 这里添加实际的Iris下载逻辑
+        fi
+        
+        if [ -n "${{ env.SHADERPACK_URL }}" ]; then
+          echo "下载光影包..."
+          curl -f -L -o temp_shaderpack.zip "${{ env.SHADERPACK_URL}}" || echo "光影包下载失败，跳过"
+          if [ -f "temp_shaderpack.zip" ]; then
+            mkdir -p shaderpacks
+            unzip -q -o temp_shaderpack.zip -d shaderpacks/ 2>/dev/null || true
+            rm -f temp_shaderpack.zip
+          fi
+        fi
+        
+    - name: 启动Minecraft服务器
+      run: |
+        echo "分配内存: ${SERVER_MEMORY}G"
+        
+        JAVA_OPTS="-Xms${SERVER_MEMORY}G -Xmx${SERVER_MEMORY}G"
+        JAVA_OPTS="$JAVA_OPTS -XX:+UseG1GC -XX:+UnlockExperimentalVMOptions"
+        
+        echo "首次启动服务器生成世界..."
+        timeout 60s java $JAVA_OPTS -jar server.jar nogui || true
+        
+        echo "服务器启动完成，运行6小时..."
+        # 使用timeout确保在6小时内停止
+        timeout 359m java $JAVA_OPTS -jar server.jar nogui || echo "服务器正常停止"
+        
+    - name: 保存服务器状态
+      if: always()
+      run: |
+        echo "正在保存服务器状态..."
+        
+        # 简单的文件备份
+        mkdir -p ${{ env.PERSISTENT_DIR }}
+        
+        # 备份世界和配置
+        for dir in world world_nether world_the_end plugins mods shaderpacks config; do
+          if [ -d "$dir" ]; then
+            cp -r "$dir" ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+          fi
+        done
+        
+        for file in server.properties eula.txt ops.json whitelist.json banned-*.json usercache.json; do
+          if [ -f "$file" ]; then
+            cp "$file" ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+          fi
+        done
+        
+        echo "持久化数据保存完成"
+        
+    - name: 上传持久化数据为Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: minecraft-world-backup
+        path: ${{ env.PERSISTENT_DIR }}
+        retention-days: 30
