@@ -1,0 +1,321 @@
+name: Minecraft Server with Persistence and Shaders
+
+on:
+  workflow_dispatch:  # 手动触发
+    inputs:
+      version:
+        description: 'Minecraft Server Version'
+        required: true
+        default: '1.20.1'
+        type: string
+      memory:
+        description: 'Server Memory (GB)'
+        required: true
+        default: '4'
+        type: string
+      shaderpack:
+        description: 'Shader Pack URL (optional)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  SERVER_VERSION: ${{ github.event.inputs.version }}
+  SERVER_MEMORY: ${{ github.event.inputs.memory }}
+  SHADERPACK_URL: ${{ github.event.inputs.shaderpack }}
+  
+  # 持久化存储设置
+  PERSISTENT_DIR: '.minecraft-persistent'
+  
+  # 服务器设置
+  SERVER_TYPE: 'paper'  # paper, purpur, fabric 可选
+  PAPER_VERSION: 'latest'
+  SERVER_PORT: '25565'
+  MAX_PLAYERS: '10'
+  
+  # 光影设置
+  IRIS_VERSION: '1.6.9'  # Iris Shaders Mod
+  OPTIFINE_VERSION: 'HD_U_I7'  # 可选
+  SHADERPACK_NAME: 'ComplementaryShaders_v4.7'
+
+jobs:
+  minecraft-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 最长运行6小时（GitHub Actions限制）
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 设置持久化存储目录
+      run: |
+        # 创建持久化目录结构
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world_nether
+        mkdir -p ${{ env.PERSISTENT_DIR }}/world_the_end
+        mkdir -p ${{ env.PERSISTENT_DIR }}/plugins
+        mkdir -p ${{ env.PERSistent_DIR }}/mods
+        mkdir -p ${{ env.PERSISTENT_DIR }}/shaderpacks
+        mkdir -p ${{ env.PERSISTENT_DIR }}/config
+        
+        # 如果存在之前的存档，恢复它
+        if [ -f "${{ env.PERSISTENT_DIR }}/server.properties" ]; then
+          echo "恢复之前的服务器配置..."
+          cp -r ${{ env.PERSISTENT_DIR }}/* . || true
+        fi
+        
+    - name: 设置Java环境
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: 下载Minecraft服务端
+      run: |
+        echo "正在下载 ${{ env.SERVER_TYPE }} 服务端..."
+        
+        if [ "${{ env.SERVER_TYPE }}" = "paper" ]; then
+          # 下载 PaperMC
+          PAPER_URL="https://api.papermc.io/v2/projects/paper/versions/${{ env.SERVER_VERSION }}/builds/${{ env.PAPER_VERSION }}/downloads/paper-${{ env.SERVER_VERSION }}-${{ env.PAPER_VERSION }}.jar"
+          curl -L -o server.jar $PAPER_URL
+          
+        elif [ "${{ env.SERVER_TYPE }}" = "purpur" ]; then
+          # 下载 Purpur
+          PURPUR_URL="https://api.purpurmc.org/v2/purpur/${{ env.SERVER_VERSION }}/latest/download"
+          curl -L -o server.jar $PURPUR_URL
+          
+        elif [ "${{ env.SERVER_TYPE }}" = "fabric" ]; then
+          # 下载 Fabric
+          FABRIC_URL="https://meta.fabricmc.net/v2/versions/loader/${{ env.SERVER_VERSION }}/0.15.7/1.0.2/server/jar"
+          curl -L -o server.jar $FABRIC_URL
+          
+        else
+          echo "使用默认的 Vanilla 服务端"
+          VANILLA_URL="https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
+          curl -L -o server.jar $VANILLA_URL
+        fi
+        
+        ls -la server.jar
+        echo "服务端下载完成！"
+        
+    - name: 生成服务器配置文件
+      run: |
+        # 创建 eula.txt（自动同意 EULA）
+        echo "eula=true" > eula.txt
+        
+        # 创建 server.properties
+        cat > server.properties << EOF
+        #Minecraft server properties
+        #$(date)
+        spawn-protection=16
+        max-tick-time=60000
+        query.port=${{ env.SERVER_PORT }}
+        generator-settings={}
+        sync-chunk-writes=true
+        force-gamemode=false
+        allow-nether=true
+        enforce-whitelist=false
+        gamemode=survival
+        broadcast-console-to-ops=true
+        enable-query=false
+        player-idle-timeout=0
+        difficulty=normal
+        broadcast-rcon-to-ops=true
+        spawn-monsters=true
+        op-permission-level=4
+        pvp=true
+        entity-broadcast-range-percentage=100
+        snooper-enabled=true
+        level-type=minecraft\:normal
+        hardcore=false
+        enable-status=true
+        enable-command-block=false
+        max-players=${{ env.MAX_PLAYERS }}
+        network-compression-threshold=256
+        resource-pack-sha1=
+        max-world-size=29999984
+        function-permission-level=2
+        rcon.port=25575
+        server-port=${{ env.SERVER_PORT }}
+        server-ip=
+        spawn-npcs=true
+        allow-flight=false
+        level-name=world
+        view-distance=10
+        resource-pack=
+        spawn-animals=true
+        white-list=false
+        rcon.password=
+        generate-structures=true
+        online-mode=true
+        max-build-height=256
+        level-seed=
+        prevent-proxy-connections=false
+        use-native-transport=true
+        enable-jmx-monitoring=false
+        motd=GitHub Actions Minecraft Server
+        rate-limit=0
+        enable-rcon=false
+        EOF
+        
+    - name: 下载并安装光影模组
+      if: ${{ env.SHADERPACK_URL != '' }}
+      run: |
+        echo "正在安装光影支持..."
+        
+        # 创建 mods 目录
+        mkdir -p mods
+        
+        # 下载 Iris Shaders（Forge/Fabric 光影模组）
+        if [ "${{ env.SERVER_TYPE }}" = "fabric" ]; then
+          # Fabric 版本
+          IRIS_MOD_URL="https://cdn.modrinth.com/data/YL57xq9U/versions/${{ env.IRIS_VERSION }}/iris-mc${{ env.SERVER_VERSION }}-${{ env.IRIS_VERSION }}.jar"
+          curl -L -o mods/iris-shaders.jar $IRIS_MOD_URL
+        else
+          # Forge 版本（或通用）
+          echo "注：Iris Shaders 主要支持 Fabric，Forge 请使用 OptiFine"
+        fi
+        
+        # 下载光影包
+        if [ "${{ env.SHADERPACK_URL }}" != "" ]; then
+          echo "下载光影包..."
+          curl -L -o ${{ env.SHADERPACK_NAME }}.zip "${{ env.SHADERPACK_URL }}"
+          mkdir -p shaderpacks
+          unzip -o ${{ env.SHADERPACK_NAME }}.zip -d shaderpacks/ || true
+          
+          # 或者使用内置的默认光影包
+          if [ ! -f "shaderpacks/*.zip" ]; then
+            echo "使用默认光影包作为备选..."
+            # 这里可以添加备选光影包的下载
+          fi
+        fi
+        
+        # 配置光影设置
+        mkdir -p config
+        cat > config/iris.properties << EOF
+        # Iris Shaders 配置
+        enableShaders=true
+        shaderPack=${{ env.SHADERPACK_NAME }}
+        internalShaderPack=false
+        EOF
+        
+    - name: 启动Minecraft服务器
+      run: |
+        echo "分配内存: ${SERVER_MEMORY}G"
+        
+        # 设置启动参数
+        JAVA_OPTS="-Xms${SERVER_MEMORY}G -Xmx${SERVER_MEMORY}G"
+        JAVA_OPTS="$JAVA_OPTS -XX:+UseG1GC"
+        JAVA_OPTS="$JAVA_OPTS -XX:+ParallelRefProcEnabled"
+        JAVA_OPTS="$JAVA_OPTS -XX:MaxGCPauseMillis=200"
+        JAVA_OPTS="$JAVA_OPTS -XX:+UnlockExperimentalVMOptions"
+        JAVA_OPTS="$JAVA_OPTS -XX:+DisableExplicitGC"
+        JAVA_OPTS="$JAVA_OPTS -XX:+AlwaysPreTouch"
+        JAVA_OPTS="$JAVA_OPTS -XX:G1HeapWastePercent=5"
+        JAVA_OPTS="$JAVA_OPTS -XX:G1MixedGCCountTarget=4"
+        JAVA_OPTS="$JAVA_OPTS -XX:G1MixedGCLiveThresholdPercent=90"
+        JAVA_OPTS="$JAVA_OPTS -XX:G1RSetUpdatingPauseTimePercent=5"
+        JAVA_OPTS="$JAVA_OPTS -XX:SurvivorRatio=32"
+        JAVA_OPTS="$JAVA_OPTS -XX:+PerfDisableSharedMem"
+        JAVA_OPTS="$JAVA_OPTS -XX:MaxTenuringThreshold=1"
+        JAVA_OPTS="$JAVA_OPTS -Dusing.aikars.flags=https://mcflags.emc.gs"
+        JAVA_OPTS="$JAVA_OPTS -Daikars.new.flags=true"
+        
+        echo "启动参数: $JAVA_OPTS"
+        
+        # 首次运行服务器生成世界
+        echo "首次启动服务器..."
+        java $JAVA_OPTS -jar server.jar nogui
+        
+        # 等待服务器完全启动
+        sleep 30
+        
+        # 发送命令到服务器控制台（如果需要）
+        echo "服务器启动完成！"
+        
+        # 保持服务器运行
+        echo "服务器将运行6小时（GitHub Actions限制）"
+        sleep 360m  # 运行6小时
+        
+    - name: 保存服务器状态
+      if: always()  # 无论成功失败都执行
+      run: |
+        echo "正在保存服务器状态..."
+        
+        # 停止服务器（发送停止命令）
+        echo "正在停止服务器..."
+        echo "stop" > >(nc localhost ${{ env.SERVER_PORT }}) 2>/dev/null || true
+        
+        # 等待服务器完全停止
+        sleep 10
+        
+        # 保存所有重要文件到持久化目录
+        echo "备份服务器数据..."
+        
+        # 备份世界文件
+        if [ -d "world" ]; then
+          cp -r world ${{ env.PERSISTENT_DIR }}/ || true
+        fi
+        
+        if [ -d "world_nether" ]; then
+          cp -r world_nether ${{ env.PERSISTENT_DIR }}/ || true
+        fi
+        
+        if [ -d "world_the_end" ]; then
+          cp -r world_the_end ${{ env.PERSISTENT_DIR }}/ || true
+        fi
+        
+        # 备份配置文件
+        cp server.properties ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp eula.txt ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp ops.json ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp whitelist.json ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp banned-players.json ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp banned-ips.json ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        cp usercache.json ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        
+        # 备份模组和插件
+        if [ -d "mods" ]; then
+          cp -r mods ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        fi
+        
+        if [ -d "plugins" ]; then
+          cp -r plugins ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        fi
+        
+        if [ -d "shaderpacks" ]; then
+          cp -r shaderpacks ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        fi
+        
+        if [ -d "config" ]; then
+          cp -r config ${{ env.PERSISTENT_DIR }}/ 2>/dev/null || true
+        fi
+        
+        echo "持久化数据大小:"
+        du -sh ${{ env.PERSISTENT_DIR }}
+        
+    - name: 上传持久化数据为Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: minecraft-world-backup
+        path: ${{ env.PERSISTENT_DIR }}
+        retention-days: 30
+        
+    - name: 恢复持久化数据到仓库（可选）
+      if: always()
+      run: |
+        # 将持久化数据提交回仓库（如果需要版本控制）
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # 添加持久化目录
+        git add ${{ env.PERSISTENT_DIR }} || true
+        
+        # 检查是否有更改
+        if ! git diff --cached --quiet; then
+          git commit -m "Save Minecraft server state $(date)"
+          git push || echo "无法推送更改，可能是权限问题"
+        else
+          echo "没有需要保存的更改"
+        fi
