@@ -1,4 +1,4 @@
-name: Redroid-WebScreen-RK Deployment
+name: Redroid-WebScreen-RK 部署
 
 on:
   push:
@@ -6,8 +6,8 @@ on:
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: '0 0 * * *'  # Run daily at midnight
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 0 * * *'  # 每天午夜运行
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   deploy:
@@ -16,72 +16,105 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up Docker
+    - name: 验证 docker-compose 文件
+      run: |
+        if [ ! -f docker-compose.yml ] && [ ! -f compose.yml ]; then
+          echo "错误: 未找到 docker-compose 文件"
+          exit 1
+        fi
+        
+    - name: 设置 Docker Buildx
       uses: docker/setup-buildx-action@v3
       
-    - name: Login to DockerHub
+    - name: 登录 DockerHub (如果需要)
+      if: secrets.DOCKER_USERNAME != ''
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
         
-    - name: Initialize Redroid environment
+    - name: 设置 Redroid 环境
       run: |
+        # 创建必要目录
         sudo mkdir -p /dev/binderfs
-        if ! mountpoint -q /dev/binderfs; then
-          sudo mount -t binder binder /dev/binderfs
-        fi
-        sudo chmod 666 /dev/binderfs/binder
-        sudo chmod 666 /dev/binderfs/hwbinder
-        sudo chmod 666 /dev/binderfs/vndbinder
         
-        if [ -e /dev/dma_heap/reserved ]; then
-          sudo chmod 666 /dev/dma_heap/reserved
-          sudo rm -f /dev/dma_heap/linux,cma
-          sudo ln -s reserved /dev/dma_heap/linux,cma
-          sudo rm -f /dev/dma_heap/system-uncached-dma32
-          sudo ln -s system-uncached /dev/dma_heap/system-uncached-dma32
-          sudo chmod 666 /dev/dma_heap/*
+        # 尝试挂载 binderfs (在 GitHub runner 上可能失败)
+        if ! mountpoint -q /dev/binderfs && sudo modprobe binder_linux; then
+          sudo mount -t binder binder /dev/binderfs || echo "BinderFS 挂载失败 - 继续执行"
         fi
         
-    - name: Create data directory
-      run: mkdir -p data
-      
-    - name: Deploy with Docker Compose
-      run: |
-        docker compose up -d
+        # 如果 binderfs 可用则设置权限
+        if [ -e /dev/binderfs/binder ]; then
+          sudo chmod 666 /dev/binderfs/binder /dev/binderfs/hwbinder /dev/binderfs/vndbinder 2>/dev/null || true
+        fi
         
-    - name: Verify deployment
-      run: |
-        docker ps
-        sleep 30
-        docker logs redroid
-        docker logs webscreen
+        # 创建数据目录
+        mkdir -p data
+        sudo chmod 777 data
         
-    - name: Set up permanent storage
-      uses: actions/cache@v4
-      with:
-        path: ./data
-        key: ${{ runner.os }}-redroid-data-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-redroid-data-
-          
-    - name: Health check
+    - name: 使用 Docker Compose 部署
       run: |
-        curl --retry 10 --retry-delay 5 http://localhost:8079 || echo "WebScreen not ready yet"
+        # 优先使用 docker-compose，否则使用 docker compose
+        if command -v docker-compose &> /dev/null; then
+          docker-compose up -d
+        else
+          docker compose up -d
+        fi
         
-    - name: Save deployment info
+    - name: 等待服务启动
       run: |
-        echo "Deployment completed at: $(date)" > deployment_info.txt
-        echo "Redroid container ID: $(docker inspect -f '{{.Id}}' redroid)" >> deployment_info.txt
-        echo "WebScreen container ID: $(docker inspect -f '{{.Id}}' webscreen)" >> deployment_info.txt
+        # 给 Redroid 更长的初始化时间
+        echo "等待服务启动..."
+        sleep 60
         
-    - name: Upload deployment artifacts
+    - name: 验证部署
+      run: |
+        echo "=== 运行中的容器 ==="
+        docker ps -a
+        
+        echo "=== Redroid 日志 ==="
+        docker logs redroid --tail 50 2>/dev/null || echo "未找到 Redroid 容器"
+        
+        echo "=== WebScreen 日志 ==="  
+        docker logs webscreen --tail 50 2>/dev/null || echo "未找到 WebScreen 容器"
+        
+    - name: WebScreen 健康检查
+      run: |
+        # 增加重试次数和延迟
+        timeout 300 bash -c 'until curl -f http://localhost:8079; do sleep 10; done' || echo "健康检查失败"
+        
+    - name: 保存部署信息
+      run: |
+        echo "部署完成时间: $(date)" > deployment_info.txt
+        echo "Git SHA: ${{ github.sha }}" >> deployment_info.txt
+        echo "运行环境: ${{ runner.os }}" >> deployment_info.txt
+        
+        # 如果可用则获取容器信息
+        docker inspect redroid --format 'Redroid ID: {{.Id}}' 2>/dev/null >> deployment_info.txt || true
+        docker inspect webscreen --format 'WebScreen ID: {{.Id}}' 2>/dev/null >> deployment_info.txt || true
+        
+    - name: 上传部署产物
       uses: actions/upload-artifact@v4
       with:
         name: deployment-info
         path: deployment_info.txt
+        retention-days: 7
         
-    - name: Restart workflow after completion
+    - name: 失败时清理
+      if: failure()
       run: |
-        echo "Workflow completed. Next run scheduled."
+        docker compose down || true
+        echo "清理完成"
+        
+  test:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    
+    steps:
+    - uses: actions/checkout@v4
+      
+    - name: 基本连通性测试
+      run: |
+        # 测试 WebScreen 是否可访问
+        curl -f http://localhost:8079 && echo "WebScreen 可访问"
